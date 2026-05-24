@@ -231,8 +231,6 @@ func PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, state, method st
 		return nil, err
 	}
 
-	fmt.Println("👉👉👉 Go 语言生成的原始 URL 是:", authURL)
-
 	return &OAuthLaunchContext{
 		ClientID:            clientID,
 		AuthURL:             authURL,
