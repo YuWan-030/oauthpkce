@@ -110,30 +110,22 @@ func buildAuthorizeURL(authBase string, params url.Values) (string, error) {
 		base = DefaultAuthBase
 	}
 
-	u, err := url.Parse(base)
-	if err != nil {
-		return "", fmt.Errorf("invalid auth_base: %w", err)
+	// 1. 去掉末尾可能存在的斜杠
+	base = strings.TrimRight(base, "/")
+
+	// 2. 检查 base 本身是否已经包含了 /oauth/authorize 后缀
+	// 如果没有，手动补上标准的授权路由
+	if !strings.HasSuffix(strings.ToLower(base), "/oauth/authorize") {
+		base = base + "/oauth/authorize"
 	}
 
-	cleanPath := strings.TrimRight(u.Path, "/")
-	if cleanPath == "" {
-		u.Path = "/oauth/authorize"
-	} else if !strings.HasSuffix(strings.ToLower(cleanPath), "/oauth/authorize") {
-		u.Path = cleanPath + "/oauth/authorize"
-	} else {
-		u.Path = cleanPath
-	}
+	// 3. 核心修复：直接使用 params.Encode() 转化为标准的 QueryString
+	queryString := params.Encode()
 
-	q := u.Query()
-	for k, vs := range params {
-		if len(vs) == 0 {
-			continue
-		}
-		q.Set(k, vs[len(vs)-1])
-	}
-	u.RawQuery = q.Encode()
+	// 4. 组装成最终的完整 URL
+	finalURL := base + "?" + queryString
 
-	return u.String(), nil
+	return finalURL, nil
 }
 
 func generateRandomString(length int) (string, error) {
@@ -170,14 +162,16 @@ func GeneratePKCEChallenge(verifier string, method string) (string, error) {
 }
 
 // OpenBrowser 跨平台打开浏览器
+// OpenBrowser 跨平台打开浏览器（改用 PowerShell 彻底解决 Windows 特殊字符截断）
 func OpenBrowser(targetURL string) error {
 	var cmd string
 	var args []string
 
 	switch runtime.GOOS {
 	case "windows":
-		cmd = "cmd"
-		args = []string{"/c", "start", targetURL}
+		// 使用 PowerShell 发起，用单引号包裹整个 URL 防止解析
+		cmd = "powershell"
+		args = []string{"-NoProfile", "-Command", fmt.Sprintf("Start-Process '%s'", targetURL)}
 	case "darwin":
 		cmd = "open"
 		args = []string{targetURL}
@@ -236,6 +230,8 @@ func PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, state, method st
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Println("👉👉👉 Go 语言生成的原始 URL 是:", authURL)
 
 	return &OAuthLaunchContext{
 		ClientID:            clientID,

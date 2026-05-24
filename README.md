@@ -150,6 +150,13 @@ import (
 	"github.com/YuWan-030/oauthpkce"
 )
 
+func init() {
+	// 💡 核心注入：修改全局默认 Transport，跳过不安全的 HTTPS 证书校验
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+}
+
 func main() {
 	res, err := oauthpkce.OneClickOAuthAuthorizeAndExchange(
 		"your-client-id",
@@ -168,6 +175,7 @@ func main() {
 	fmt.Println("Auth URL:", res.AuthURL)
 	fmt.Println("Code:", res.CallbackResult.Code)
 	fmt.Println("Access Token:", res.TokenResponse.AccessToken)
+	fmt.Println("Refresh Token:", res.TokenResponse.RefreshToken)
 }
 ```
 
