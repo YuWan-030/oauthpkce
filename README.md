@@ -12,7 +12,7 @@
 ## 安装
 
 ```bash
-go get github.com/YuWan-030/oauthpkce@latest
+go get github.com/YuWan-030/oauthpkce@HEAD
 ```
 
 ## 导入
