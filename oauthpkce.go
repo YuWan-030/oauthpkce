@@ -52,6 +52,34 @@ type TokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
+// TokenFields 常用 Token 字段
+type TokenFields struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	Scope        string `json:"scope"`
+}
+
+// OAuthStartResult 一键启动阶段返回结果
+type OAuthStartResult struct {
+	OAuthLaunchContext
+	CallbackResult *OAuthCallbackResult `json:"callback,omitempty"`
+	StateOK        bool                 `json:"state_ok"`
+}
+
+// CompactResult 一键授权后的精简结果
+type CompactResult struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int64  `json:"expires_in"`
+	Scope        string `json:"scope"`
+	Code         string `json:"code"`
+	State        string `json:"state"`
+	CodeVerifier string `json:"code_verifier"`
+}
+
 // FullResult 完整的一键授权返回结果
 type FullResult struct {
 	OAuthLaunchContext
@@ -63,6 +91,49 @@ type FullResult struct {
 
 func urlSafeB64WithoutPadding(b []byte) string {
 	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
+}
+
+func joinOAuthEndpoint(base, path string) string {
+	trimmedBase := strings.TrimRight(strings.TrimSpace(base), "/")
+	if trimmedBase == "" {
+		return path
+	}
+	if strings.HasSuffix(strings.ToLower(trimmedBase), strings.ToLower(path)) {
+		return trimmedBase
+	}
+	return trimmedBase + path
+}
+
+func buildAuthorizeURL(authBase string, params url.Values) (string, error) {
+	base := strings.TrimSpace(authBase)
+	if base == "" {
+		base = DefaultAuthBase
+	}
+
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid auth_base: %w", err)
+	}
+
+	cleanPath := strings.TrimRight(u.Path, "/")
+	if cleanPath == "" {
+		u.Path = "/oauth/authorize"
+	} else if !strings.HasSuffix(strings.ToLower(cleanPath), "/oauth/authorize") {
+		u.Path = cleanPath + "/oauth/authorize"
+	} else {
+		u.Path = cleanPath
+	}
+
+	q := u.Query()
+	for k, vs := range params {
+		if len(vs) == 0 {
+			continue
+		}
+		q.Set(k, vs[len(vs)-1])
+	}
+	u.RawQuery = q.Encode()
+
+	return u.String(), nil
 }
 
 func generateRandomString(length int) (string, error) {
@@ -161,7 +232,10 @@ func PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, state, method st
 	params.Set("code_challenge", challenge)
 	params.Set("code_challenge_method", strings.ToUpper(method))
 
-	authURL := fmt.Sprintf("%s/oauth/authorize?%s", strings.TrimRight(authBase, "/"), params.Encode())
+	authURL, err := buildAuthorizeURL(authBase, params)
+	if err != nil {
+		return nil, err
+	}
 
 	return &OAuthLaunchContext{
 		ClientID:            clientID,
@@ -258,11 +332,24 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 
 // ExchangeAuthorizationCodeForToken 交换 Token
 func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifier, authBase string, useBasicAuth bool, timeout time.Duration) (*TokenResponse, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return nil, errors.New("client_id is required")
+	}
+	if strings.TrimSpace(clientSecret) == "" {
+		return nil, errors.New("client_secret is required")
+	}
+	if strings.TrimSpace(code) == "" {
+		return nil, errors.New("authorization code is required")
+	}
+	if strings.TrimSpace(codeVerifier) == "" {
+		return nil, errors.New("code_verifier is required")
+	}
+
 	if authBase == "" {
 		authBase = DefaultAuthBase
 	}
 
-	tokenURL := fmt.Sprintf("%s/oauth/token", strings.TrimRight(authBase, "/"))
+	tokenURL := joinOAuthEndpoint(authBase, "/oauth/token")
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
@@ -318,6 +405,162 @@ func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifie
 	return &tokenRes, nil
 }
 
+// RefreshAccessToken 使用 refresh_token 刷新访问令牌
+func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, useBasicAuth bool, timeout time.Duration) (*TokenResponse, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return nil, errors.New("client_id is required")
+	}
+	if strings.TrimSpace(clientSecret) == "" {
+		return nil, errors.New("client_secret is required")
+	}
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil, errors.New("refresh_token is required")
+	}
+	if authBase == "" {
+		authBase = DefaultAuthBase
+	}
+
+	tokenURL := joinOAuthEndpoint(authBase, "/oauth/token")
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", strings.TrimSpace(refreshToken))
+
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	if useBasicAuth {
+		req.SetBasicAuth(strings.TrimSpace(clientID), strings.TrimSpace(clientSecret))
+	} else {
+		form.Set("client_id", strings.TrimSpace(clientID))
+		form.Set("client_secret", strings.TrimSpace(clientSecret))
+		req.Body = io.NopCloser(strings.NewReader(form.Encode()))
+		req.ContentLength = int64(len(form.Encode()))
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("refresh token failed: http %d, body=%s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var tokenRes TokenResponse
+	if err := json.Unmarshal(bodyBytes, &tokenRes); err != nil {
+		return nil, fmt.Errorf("failed to parse token json: %w, raw=%s", err, string(bodyBytes))
+	}
+
+	return &tokenRes, nil
+}
+
+// RevokeToken 调用 /oauth/revoke 撤销访问令牌
+func RevokeToken(token, authBase, tokenTypeHint, clientID, clientSecret string, useBasicAuth bool, timeout time.Duration) error {
+	if strings.TrimSpace(token) == "" {
+		return errors.New("token is required")
+	}
+	if authBase == "" {
+		authBase = DefaultAuthBase
+	}
+	if tokenTypeHint == "" {
+		tokenTypeHint = "access_token"
+	}
+
+	revokeURL := joinOAuthEndpoint(authBase, "/oauth/revoke")
+	form := url.Values{}
+	form.Set("token", strings.TrimSpace(token))
+	form.Set("token_type_hint", tokenTypeHint)
+
+	req, err := http.NewRequest("POST", revokeURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+
+	if useBasicAuth && strings.TrimSpace(clientID) != "" && strings.TrimSpace(clientSecret) != "" {
+		req.SetBasicAuth(strings.TrimSpace(clientID), strings.TrimSpace(clientSecret))
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("revoke token failed: http %d, body=%s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
+}
+
+// ExtractTokenFields 提取常用 Token 字段
+func ExtractTokenFields(tokenResponse *TokenResponse) TokenFields {
+	if tokenResponse == nil {
+		return TokenFields{}
+	}
+	return TokenFields{
+		AccessToken:  tokenResponse.AccessToken,
+		RefreshToken: tokenResponse.RefreshToken,
+		TokenType:    tokenResponse.TokenType,
+		ExpiresIn:    tokenResponse.ExpiresIn,
+		Scope:        tokenResponse.Scope,
+	}
+}
+
+// OneClickOAuthStart 一键启动授权流程（可选等待回调）
+func OneClickOAuthStart(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, waitCallback bool, timeout time.Duration) (*OAuthStartResult, error) {
+	launch, err := PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, "", "S256")
+	if err != nil {
+		return nil, err
+	}
+
+	if autoOpenBrowser {
+		if err := OpenBrowser(launch.AuthURL); err != nil {
+			return nil, fmt.Errorf("failed to open browser: %w", err)
+		}
+	}
+
+	result := &OAuthStartResult{OAuthLaunchContext: *launch}
+	if !waitCallback {
+		return result, nil
+	}
+
+	callback, err := WaitForOAuthCallback(launch.RedirectURI, timeout)
+	if err != nil {
+		return nil, err
+	}
+	result.CallbackResult = callback
+	if callback != nil {
+		result.StateOK = callback.State == launch.State
+	}
+
+	return result, nil
+}
+
 // OneClickOAuthAuthorizeAndExchange 一键完成授权和令牌交换
 func OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration, useBasicAuth bool) (*FullResult, error) {
 	// 1. 准备 Launch Context
@@ -365,4 +608,29 @@ func OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirec
 		CallbackResult:     callback,
 		TokenResponse:      tokenRes,
 	}, nil
+}
+
+// OneClickOAuthAuthorizeAndExchangeCompact 一键授权并返回精简结果
+func OneClickOAuthAuthorizeAndExchangeCompact(clientID, clientSecret, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration, useBasicAuth bool) (*CompactResult, error) {
+	full, err := OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirectURI, scope, autoOpenBrowser, timeout, useBasicAuth)
+	if err != nil {
+		return nil, err
+	}
+
+	compact := &CompactResult{
+		State:        full.State,
+		CodeVerifier: full.CodeVerifier,
+	}
+	if full.CallbackResult != nil {
+		compact.Code = full.CallbackResult.Code
+	}
+	if full.TokenResponse != nil {
+		compact.AccessToken = full.TokenResponse.AccessToken
+		compact.RefreshToken = full.TokenResponse.RefreshToken
+		compact.TokenType = full.TokenResponse.TokenType
+		compact.ExpiresIn = full.TokenResponse.ExpiresIn
+		compact.Scope = full.TokenResponse.Scope
+	}
+
+	return compact, nil
 }
