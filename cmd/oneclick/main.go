@@ -1,28 +1,60 @@
 package main
 
 import (
+	"crypto/tls"
+	"encoding/json"
+	"flag"
 	"fmt"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/YuWan-030/oauthpkce"
 )
 
 func main() {
-	res, err := oauthpkce.OneClickOAuthAuthorizeAndExchange(
-		"cli_4f786a5d11afb431",
-		"sec_08f2c88bbaea4d7ba754400bcd54ec50",
-		"https://114.66.48.61:8900",
-		"http://127.0.0.1:8765/callback",
-		"read",
-		true, // autoOpenBrowser
-		2*time.Minute,
-		true, // useBasicAuth
+	clientID := flag.String("client-id", os.Getenv("OAUTH_CLIENT_ID"), "OAuth client_id")
+	authBase := flag.String("auth-base", getEnvOrDefault("OAUTH_AUTH_BASE", oauthpkce.DefaultAuthBase), "OAuth server base URL")
+	redirectURI := flag.String("redirect-uri", getEnvOrDefault("OAUTH_REDIRECT_URI", oauthpkce.DefaultRedirectURI), "OAuth redirect URI")
+	scope := flag.String("scope", getEnvOrDefault("OAUTH_SCOPE", "read"), "OAuth scope")
+	timeoutSeconds := flag.Int("timeout-seconds", 180, "Wait timeout in seconds")
+	autoOpenBrowser := flag.Bool("auto-open-browser", true, "Open browser automatically")
+	insecureSkipVerify := flag.Bool("insecure-skip-verify", true, "Skip TLS certificate verification for testing")
+	flag.Parse()
+
+	if *clientID == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "client-id is required")
+		os.Exit(2)
+	}
+
+	if *insecureSkipVerify {
+		if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
+	}
+
+	res, err := oauthpkce.OneClickPKCEAuthorizeAndExchange(
+		*clientID,
+		*authBase,
+		*redirectURI,
+		*scope,
+		*autoOpenBrowser,
+		time.Duration(*timeoutSeconds)*time.Second,
 	)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println("Auth URL:", res.AuthURL)
-	fmt.Println("Code:", res.CallbackResult.Code)
-	fmt.Println("Access Token:", res.TokenResponse.AccessToken)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(res); err != nil {
+		panic(err)
+	}
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

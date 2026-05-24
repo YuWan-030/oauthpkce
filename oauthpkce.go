@@ -451,18 +451,24 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 	}
 }
 
-// ExchangeAuthorizationCodeForToken 交换 Token
+// ExchangeAuthorizationCodeForToken 交换 Token。
+// 对于纯 PKCE 公共客户端，可传空 clientSecret，并将 useBasicAuth 设为 false。
 func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifier, authBase string, useBasicAuth bool, timeout time.Duration) (*TokenResponse, error) {
-	if strings.TrimSpace(clientID) == "" {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	code = strings.TrimSpace(code)
+	codeVerifier = strings.TrimSpace(codeVerifier)
+
+	if clientID == "" {
 		return nil, errors.New("client_id is required")
 	}
-	if strings.TrimSpace(clientSecret) == "" {
-		return nil, errors.New("client_secret is required")
+	if useBasicAuth && clientSecret == "" {
+		return nil, errors.New("client_secret is required when useBasicAuth is true")
 	}
-	if strings.TrimSpace(code) == "" {
+	if code == "" {
 		return nil, errors.New("authorization code is required")
 	}
-	if strings.TrimSpace(codeVerifier) == "" {
+	if codeVerifier == "" {
 		return nil, errors.New("code_verifier is required")
 	}
 
@@ -488,7 +494,9 @@ func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifie
 		req.SetBasicAuth(clientID, clientSecret)
 	} else {
 		form.Set("client_id", clientID)
-		form.Set("client_secret", clientSecret)
+		if clientSecret != "" {
+			form.Set("client_secret", clientSecret)
+		}
 		req, err = http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
 		if err != nil {
 			return nil, err
@@ -507,7 +515,7 @@ func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifie
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -526,15 +534,25 @@ func ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifie
 	return &tokenRes, nil
 }
 
-// RefreshAccessToken 使用 refresh_token 刷新访问令牌
+// ExchangeAuthorizationCodeForPKCEToken 使用纯 PKCE 公共客户端交换 Token。
+func ExchangeAuthorizationCodeForPKCEToken(clientID, code, codeVerifier, authBase string, timeout time.Duration) (*TokenResponse, error) {
+	return ExchangeAuthorizationCodeForToken(clientID, "", code, codeVerifier, authBase, false, timeout)
+}
+
+// RefreshAccessToken 使用 refresh_token 刷新访问令牌。
+// 对于纯 PKCE 公共客户端，可传空 clientSecret，并将 useBasicAuth 设为 false。
 func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, useBasicAuth bool, timeout time.Duration) (*TokenResponse, error) {
-	if strings.TrimSpace(clientID) == "" {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	refreshToken = strings.TrimSpace(refreshToken)
+
+	if clientID == "" {
 		return nil, errors.New("client_id is required")
 	}
-	if strings.TrimSpace(clientSecret) == "" {
-		return nil, errors.New("client_secret is required")
+	if useBasicAuth && clientSecret == "" {
+		return nil, errors.New("client_secret is required when useBasicAuth is true")
 	}
-	if strings.TrimSpace(refreshToken) == "" {
+	if refreshToken == "" {
 		return nil, errors.New("refresh_token is required")
 	}
 	if authBase == "" {
@@ -545,7 +563,7 @@ func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, u
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", strings.TrimSpace(refreshToken))
+	form.Set("refresh_token", refreshToken)
 
 	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -553,10 +571,12 @@ func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, u
 	}
 
 	if useBasicAuth {
-		req.SetBasicAuth(strings.TrimSpace(clientID), strings.TrimSpace(clientSecret))
+		req.SetBasicAuth(clientID, clientSecret)
 	} else {
-		form.Set("client_id", strings.TrimSpace(clientID))
-		form.Set("client_secret", strings.TrimSpace(clientSecret))
+		form.Set("client_id", clientID)
+		if clientSecret != "" {
+			form.Set("client_secret", clientSecret)
+		}
 		req.Body = io.NopCloser(strings.NewReader(form.Encode()))
 		req.ContentLength = int64(len(form.Encode()))
 	}
@@ -570,7 +590,7 @@ func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, u
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -587,6 +607,11 @@ func RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, u
 	}
 
 	return &tokenRes, nil
+}
+
+// RefreshPKCEAccessToken 使用纯 PKCE 公共客户端刷新访问令牌。
+func RefreshPKCEAccessToken(clientID, refreshToken, authBase string, timeout time.Duration) (*TokenResponse, error) {
+	return RefreshAccessToken(clientID, "", refreshToken, authBase, false, timeout)
 }
 
 // RevokeToken 调用 /oauth/revoke 撤销访问令牌
@@ -624,7 +649,7 @@ func RevokeToken(token, authBase, tokenTypeHint, clientID, clientSecret string, 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -734,6 +759,76 @@ func OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirec
 // OneClickOAuthAuthorizeAndExchangeCompact 一键授权并返回精简结果
 func OneClickOAuthAuthorizeAndExchangeCompact(clientID, clientSecret, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration, useBasicAuth bool) (*CompactResult, error) {
 	full, err := OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirectURI, scope, autoOpenBrowser, timeout, useBasicAuth)
+	if err != nil {
+		return nil, err
+	}
+
+	compact := &CompactResult{
+		State:        full.State,
+		CodeVerifier: full.CodeVerifier,
+	}
+	if full.CallbackResult != nil {
+		compact.Code = full.CallbackResult.Code
+	}
+	if full.TokenResponse != nil {
+		compact.AccessToken = full.TokenResponse.AccessToken
+		compact.RefreshToken = full.TokenResponse.RefreshToken
+		compact.TokenType = full.TokenResponse.TokenType
+		compact.ExpiresIn = full.TokenResponse.ExpiresIn
+		compact.Scope = full.TokenResponse.Scope
+	}
+
+	return compact, nil
+}
+
+// OneClickPKCEAuthorizeAndExchange 一键完成纯 PKCE 授权和令牌交换。
+func OneClickPKCEAuthorizeAndExchange(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration) (*FullResult, error) {
+	launch, err := PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, "", "S256")
+	if err != nil {
+		return nil, err
+	}
+
+	if autoOpenBrowser {
+		if err := OpenBrowser(launch.AuthURL); err != nil {
+			return nil, fmt.Errorf("failed to open browser: %w", err)
+		}
+	}
+
+	callback, err := WaitForOAuthCallback(launch.RedirectURI, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	if callback.Error != "" {
+		return nil, fmt.Errorf("oauth callback returned error: %s", callback.Error)
+	}
+	if callback.State != launch.State {
+		return nil, errors.New("oauth callback state mismatch")
+	}
+	if callback.Code == "" {
+		return nil, errors.New("oauth callback missing authorization code")
+	}
+
+	tokenTimeout := 30 * time.Second
+	if timeout < tokenTimeout {
+		tokenTimeout = timeout
+	}
+
+	tokenRes, err := ExchangeAuthorizationCodeForPKCEToken(clientID, callback.Code, launch.CodeVerifier, authBase, tokenTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FullResult{
+		OAuthLaunchContext: *launch,
+		CallbackResult:     callback,
+		TokenResponse:      tokenRes,
+	}, nil
+}
+
+// OneClickPKCEAuthorizeAndExchangeCompact 一键完成纯 PKCE 授权并返回精简结果。
+func OneClickPKCEAuthorizeAndExchangeCompact(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration) (*CompactResult, error) {
+	full, err := OneClickPKCEAuthorizeAndExchange(clientID, authBase, redirectURI, scope, autoOpenBrowser, timeout)
 	if err != nil {
 		return nil, err
 	}

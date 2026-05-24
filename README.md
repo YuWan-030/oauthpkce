@@ -1,11 +1,11 @@
 # oauthpkce
 
-一个轻量的 Go OAuth2 + PKCE 工具库，支持：
+一个轻量的 Go OAuth2 + PKCE 工具库，主打纯 PKCE 公共客户端流程，支持：
 
 - 生成 PKCE `code_verifier` / `code_challenge`
 - 组装授权地址
 - 启动本地回调服务接收授权码
-- 交换授权码获取 Token
+- 使用纯 PKCE 交换授权码获取 Token
 - 一键完成授权 + 回调 + Token 交换
 - 刷新 Token / 撤销 Token
 
@@ -21,8 +21,6 @@ go get github.com/YuWan-030/oauthpkce@latest
 import "github.com/YuWan-030/oauthpkce"
 ```
 
-## 快速示例
-
 ## 直接运行（自动开浏览器 + 等待回调 + 换 token）
 
 项目内置了可执行入口：`cmd/oneclick/main.go`。
@@ -30,7 +28,6 @@ import "github.com/YuWan-030/oauthpkce"
 ```powershell
 Set-Location "C:\Users\Administrator\GolandProjects\oauthpkce"
 $env:OAUTH_CLIENT_ID="your-client-id"
-$env:OAUTH_CLIENT_SECRET="your-client-secret"
 $env:OAUTH_AUTH_BASE="https://login.example.com"
 $env:OAUTH_REDIRECT_URI="http://127.0.0.1:8765/callback"
 $env:OAUTH_SCOPE="read"
@@ -41,12 +38,14 @@ go run ./cmd/oneclick
 
 ```powershell
 Set-Location "C:\Users\Administrator\GolandProjects\oauthpkce"
-go run ./cmd/oneclick --client-id "your-client-id" --client-secret "your-client-secret" --auth-base "https://login.example.com" --redirect-uri "http://127.0.0.1:8765/callback" --scope "read" --timeout-seconds 180 --use-basic-auth=true --auto-open-browser=true
+go run ./cmd/oneclick --client-id "your-client-id" --auth-base "https://login.example.com" --redirect-uri "http://127.0.0.1:8765/callback" --scope "read" --timeout-seconds 180 --auto-open-browser=true --insecure-skip-verify=true
 ```
 
-成功后会输出 JSON（包含 `access_token`、`refresh_token`、`code_verifier` 等）。
+成功后会输出 JSON（包含 `auth_url`、`code_verifier`、`code`、`access_token`、`refresh_token` 等）。
 
-### 0) 一个函数完成授权+换 Token
+## 快速示例
+
+### 0) 一个函数完成纯 PKCE 授权 + 换 Token
 
 ```go
 package main
@@ -59,15 +58,13 @@ import (
 )
 
 func main() {
-	res, err := oauthpkce.OneClickOAuthAuthorizeAndExchangeCompact(
+	res, err := oauthpkce.OneClickPKCEAuthorizeAndExchangeCompact(
 		"your-client-id",
-		"your-client-secret",
 		"https://login.example.com",
 		"http://127.0.0.1:8765/callback",
 		"read",
 		true,
 		2*time.Minute,
-		true,
 	)
 	if err != nil {
 		panic(err)
@@ -79,7 +76,7 @@ func main() {
 }
 ```
 
-### 1) 仅生成授权 URL（推荐先用这个）
+### 1) 仅生成授权 URL
 
 ```go
 package main
@@ -108,7 +105,7 @@ func main() {
 }
 ```
 
-### 2) 交换授权码为 Token
+### 2) 使用纯 PKCE 交换授权码为 Token
 
 ```go
 package main
@@ -121,13 +118,11 @@ import (
 )
 
 func main() {
-	token, err := oauthpkce.ExchangeAuthorizationCodeForToken(
+	token, err := oauthpkce.ExchangeAuthorizationCodeForPKCEToken(
 		"your-client-id",
-		"your-client-secret",
 		"authorization-code",
 		"code-verifier",
 		"https://login.example.com",
-		true, // use basic auth
 		5*time.Second,
 	)
 	if err != nil {
@@ -144,38 +139,29 @@ func main() {
 package main
 
 import (
-	"fmt"
+	"encoding/json"
+	"os"
 	"time"
 
 	"github.com/YuWan-030/oauthpkce"
 )
 
-func init() {
-	// 💡 核心注入：修改全局默认 Transport，跳过不安全的 HTTPS 证书校验
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-}
-
 func main() {
-	res, err := oauthpkce.OneClickOAuthAuthorizeAndExchange(
+	res, err := oauthpkce.OneClickPKCEAuthorizeAndExchange(
 		"your-client-id",
-		"your-client-secret",
 		"https://login.example.com",
 		"http://127.0.0.1:8765/callback",
 		"user_info",
-		true,  // autoOpenBrowser
+		true,
 		2*time.Minute,
-		true,  // useBasicAuth
 	)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println("Auth URL:", res.AuthURL)
-	fmt.Println("Code:", res.CallbackResult.Code)
-	fmt.Println("Access Token:", res.TokenResponse.AccessToken)
-	fmt.Println("Refresh Token:", res.TokenResponse.RefreshToken)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(res)
 }
 ```
 
@@ -186,13 +172,13 @@ func main() {
 - `PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, state, method string)`
 - `OpenBrowser(targetURL string)`
 - `WaitForOAuthCallback(redirectURI string, timeout time.Duration)`
-- `ExchangeAuthorizationCodeForToken(clientID, clientSecret, code, codeVerifier, authBase string, useBasicAuth bool, timeout time.Duration)`
-- `RefreshAccessToken(clientID, clientSecret, refreshToken, authBase string, useBasicAuth bool, timeout time.Duration)`
+- `ExchangeAuthorizationCodeForPKCEToken(clientID, code, codeVerifier, authBase string, timeout time.Duration)`
+- `RefreshPKCEAccessToken(clientID, refreshToken, authBase string, timeout time.Duration)`
 - `RevokeToken(token, authBase, tokenTypeHint, clientID, clientSecret string, useBasicAuth bool, timeout time.Duration)`
 - `ExtractTokenFields(tokenResponse *TokenResponse)`
 - `OneClickOAuthStart(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, waitCallback bool, timeout time.Duration)`
-- `OneClickOAuthAuthorizeAndExchange(clientID, clientSecret, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration, useBasicAuth bool)`
-- `OneClickOAuthAuthorizeAndExchangeCompact(clientID, clientSecret, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration, useBasicAuth bool)`
+- `OneClickPKCEAuthorizeAndExchange(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration)`
+- `OneClickPKCEAuthorizeAndExchangeCompact(clientID, authBase, redirectURI, scope string, autoOpenBrowser bool, timeout time.Duration)`
 
 ## 测试
 
@@ -205,5 +191,6 @@ go test ./...
 - `code_verifier` 长度必须在 `[43, 128]`
 - `code_challenge_method` 支持 `S256` 和 `PLAIN`
 - 默认 `redirect_uri` 为 `http://127.0.0.1:8765/callback`
+- 纯 PKCE 场景不需要 `client_secret`
 - 生产环境建议优先使用 `S256`
 
