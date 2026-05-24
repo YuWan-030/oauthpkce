@@ -242,19 +242,15 @@ func PrepareOAuthLaunch(clientID, authBase, redirectURI, scope, state, method st
 	}, nil
 }
 
-// WaitForOAuthCallback 启动本地服务器捕获回调
+// WaitForOAuthCallback 启动本地服务器捕获回调（修复版）
 func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCallbackResult, error) {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, errors.New("redirect_uri must be http or https")
-	}
 
 	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil {
-		// 如果没有显式端口，试着补全
 		if u.Scheme == "https" {
 			host, port = u.Host, "443"
 		} else {
@@ -267,15 +263,140 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 		expectedPath = "/"
 	}
 
-	// 使用 Channel 传递结果
 	resultChan := make(chan *OAuthCallbackResult, 1)
 
-	// 创建并配置本地 HTTP 服务器
 	mux := http.NewServeMux()
 	server := &http.Server{
 		Addr:    net.JoinHostPort(host, port),
 		Handler: mux,
 	}
+
+	// 1. 将模板移到函数外部，作为包级别常量
+	const callbackTemplate = `<!DOCTYPE html>
+	<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>OAuth 认证结果</title>
+		<style>
+			:root {
+				--bg-success: #e6f4ea;
+				--primary-success: #137333;
+				--bg-error: #fce8e6;
+				--primary-error: #c5221f;
+			}
+			body { 
+				font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, sans-serif; 
+				background-color: #f8f9fa; 
+				display: flex; 
+				justify-content: center; 
+				align-items: center; 
+				height: 100vh; 
+				margin: 0;
+				-webkit-font-smoothing: antialiased;
+			}
+			/* 融合 Apple 悬浮卡片与 Google 平面呼吸感 */
+			.card { 
+				background: #ffffff; 
+				padding: 48px 32px; 
+				border-radius: 24px; 
+				box-shadow: 0 12px 40px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02); 
+				text-align: center; 
+				max-width: 360px; 
+				width: 85%%; 
+				transition: transform 0.3s ease;
+			}
+			/* 状态图标：改用高阶几何圆形，抛弃粗糙的 Emoji */
+			.icon-wrapper {
+				width: 64px;
+				height: 64px;
+				border-radius: 50%%;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				margin: 0 auto 24px auto;
+				position: relative;
+			}
+			/* 成功状态样式 (Google 绿) */
+			.success .icon-wrapper {
+				background-color: var(--bg-success);
+				color: var(--primary-success);
+			}
+			.success .icon-wrapper::after {
+				content: "✓";
+				font-size: 28px;
+				font-weight: bold;
+			}
+			/* 失败状态样式 (Google 红) */
+			.error .icon-wrapper {
+				background-color: var(--bg-error);
+				color: var(--primary-error);
+			}
+			.error .icon-wrapper::after {
+				content: "✕";
+				font-size: 24px;
+				font-weight: bold;
+			}
+			/* 字体排阶 */
+			h2 { 
+				margin: 0 0 12px 0; 
+				color: #1f1f1f; 
+				font-size: 22px;
+				font-weight: 500;
+				letter-spacing: -0.01em;
+			}
+			p { 
+				color: #5f6368; 
+				margin: 0 0 28px 0; 
+				font-size: 14px; 
+				line-height: 1.5;
+			}
+			/* 底部精致的微提示标签 */
+			.badge {
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				padding: 6px 12px;
+				background-color: #f1f3f4;
+				border-radius: 100px;
+				color: #70757a;
+				font-size: 12px;
+			}
+			.badge .dot {
+				width: 6px;
+				height: 6px;
+				background-color: #1a73e8;
+				border-radius: 50%%;
+				animation: blink 1.5s infinite ease-in-out;
+			}
+			@keyframes blink {
+				0%%, 100%% { opacity: 0.4; }
+				50%% { opacity: 1; }
+			}
+		</style>
+	</head>
+	<body>
+		<div class="card %s">
+			<div class="icon-wrapper"></div>
+			<h2>%s</h2>
+			<p>您的身份认证已安全完成。<br>页面数据已同步更新。</p>
+			<div class="badge">
+				<div class="dot"></div>
+				<span>窗口将在 3 秒后自动关闭</span>
+			</div>
+		</div>
+		<script>
+			setTimeout(function() {
+				window.close();
+			}, 3000);
+		</script>
+	</body>
+	</html>`
+
+	// 修复点 1：屏蔽掉浏览器自带的 favicon 请求，防止干扰主路由
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
 
 	mux.HandleFunc(expectedPath, func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -286,18 +407,26 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 			RawQuery: query,
 		}
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		// 渲染 HTML 界面
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
 		if res.Error != "" {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("OAuth callback received error. You can close this window."))
+			// 参数1: "error" 对应红圈样式； 参数2: 标题
+			html := fmt.Sprintf(callbackTemplate, "error", "认证未成功")
+			_, _ = w.Write([]byte(html))
 		} else {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("OAuth callback received successfully. You can close this window."))
+			// 参数1: "success" 对应绿圈样式； 参数2: 标题
+			html := fmt.Sprintf(callbackTemplate, "success", "认证成功")
+			_, _ = w.Write([]byte(html))
 		}
-
-		// 发送结果，并在独立协程中优雅关闭服务器
-		resultChan <- res
+		// 修复点 2：不要在这里写 resultChan <- res，也不要直接 shutdown
+		// 采用延时关闭策略，确保 HTTP 响应体完整输出到浏览器
 		go func() {
+			// 给浏览器 1 秒的时间来完全接收数据和渲染
+			time.Sleep(1 * time.Second)
+			resultChan <- res
 			_ = server.Shutdown(context.Background())
 		}()
 	})
@@ -305,12 +434,11 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 	// 异步启动服务器
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// 如果启动失败（例如端口被占用），向 channel 发送 nil
 			resultChan <- nil
 		}
 	}()
 
-	// 阻塞等待：要么超时，要么收到回调
+	// 阻塞等待
 	select {
 	case res := <-resultChan:
 		if res == nil {
@@ -318,7 +446,6 @@ func WaitForOAuthCallback(redirectURI string, timeout time.Duration) (*OAuthCall
 		}
 		return res, nil
 	case <-time.After(timeout):
-		// 超时关闭服务器
 		_ = server.Shutdown(context.Background())
 		return nil, errors.New("oauth callback timeout")
 	}
